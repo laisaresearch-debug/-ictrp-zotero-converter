@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ICTRP XML → RIS para Zotero</title>
+<style>
+:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#1b2734;background:#f5f7fa}
+body{max-width:800px;margin:38px auto;padding:0 20px}main{background:white;border:1px solid #dce3eb;border-radius:16px;padding:30px;box-shadow:0 10px 30px #0b18300b}
+h1{font-size:1.6rem;margin:0 0 9px}p{line-height:1.5;color:#405266}label{display:block;margin:20px 0 8px;font-weight:600}
+input[type=file]{width:100%;box-sizing:border-box;padding:12px;border:1px dashed #9caabe;border-radius:8px}
+label.option{display:flex;align-items:flex-start;gap:9px;font-weight:400;margin:14px 0;color:#293c50}label.option input{margin-top:4px}
+button{background:#135f91;color:white;border:0;border-radius:8px;padding:12px 18px;font-weight:700;font-size:1rem;cursor:pointer}button:disabled{background:#9eaebd;cursor:not-allowed}
+#status{white-space:pre-wrap;padding:14px;background:#f3f7fa;border-radius:8px;margin-top:18px;color:#1c3750;min-height:3em}
+small{display:block;color:#5a6878;line-height:1.5;margin-top:15px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef3f7;padding:14px;border-radius:8px;max-height:250px;overflow:auto}
+.hidden{display:none}h2{font-size:1.1rem;margin-top:25px}
+</style>
+</head>
+<body><main>
+<h1>ICTRP → Zotero</h1>
+<p>Converte o XML <strong>original da WHO ICTRP</strong> para RIS, com mapeamento dos campos dos ensaios clínicos. Funciona localmente no navegador: o arquivo não é enviado a nenhum servidor.</p>
+<label for="xmlFile">1. Selecione o XML exportado do ICTRP</label>
+<input type="file" id="xmlFile" accept=".xml,application/xml,text/xml">
+<label class="option"><input id="synthesize" type="checkbox" checked> <span>Se o registro não tiver resumo próprio, criar um <strong>resumo de triagem identificado</strong>, copiando campos existentes (condição, intervenção, desenho, desfechos e amostra prevista). Não inventa dados.</span></label>
+<label class="option"><input id="allFields" type="checkbox" checked> <span>Preservar outros campos do ICTRP como notas no Zotero (recomendado para revisão sistemática).</span></label>
+<p><button id="convert">2. Converter para RIS</button> <button id="download" disabled>3. Baixar RIS</button></p>
+<div id="status" role="status" aria-live="polite">Selecione um arquivo para começar.</div>
+<section id="previewSection" class="hidden"><h2>Prévia do primeiro registro</h2><pre id="preview"></pre></section>
+<small><strong>Importação no Zotero:</strong> Arquivo → Importar → Um arquivo → selecione o .ris baixado. Registros de ensaios clínicos são classificados como <em>Relatório</em>, não como artigos publicados. A data de registro não é a data de publicação.</small>
+<small><strong>Controle de qualidade:</strong> compare a quantidade de registros e pelo menos 3 títulos/IDs com o arquivo original. Se algum campo faltar, mantenha o XML e envie-o para correção do mapeamento.</small>
+</main>
+<script>
+'use strict';
+const input = document.getElementById('xmlFile');
+const status = document.getElementById('status');
+const downloadButton = document.getElementById('download');
+const previewSection = document.getElementById('previewSection');
+const preview = document.getElementById('preview');
+let risOutput = '';
+const canonical = key => key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'');
+const labelMap = {
+  trialid:'ID do registro', publictitle:'Título público', scientifictitle:'Título científico',
+  recruitmentstatus:'Estado de recrutamento', targetsize:'Amostra planejada (Target_size)',
+  studytype:'Tipo do estudo', studydesign:'Desenho do estudo', intervention:'Intervenção',
+  primaryoutcome:'Desfecho primário', secondaryoutcome:'Desfecho secundário',
+  inclusioncriteria:'Critérios de inclusão', exclusioncriteria:'Critérios de exclusão',
+  healthcondition:'Condição estudada', countries:'Países', primarysponsor:'Patrocinador principal',
+  dateregistration:'Data de registro', dateregistration3:'Data de registro',
+  sourceregister:'Registro de origem'
+};
+function plainText(node){
+  // Inclui conteúdo de eventuais subelementos e preserva quebras <br>.
+  let result = '';
+  function walk(n){
+    if(n.nodeType === 3 || n.nodeType === 4){result += n.nodeValue;return;}
+    if(n.nodeType === 1 && canonical(n.localName || n.nodeName) === 'br'){result+='\n';return;}
+    for(const ch of n.childNodes) walk(ch);
+  }
+  walk(node);
+  return result.replace(/<br\s*\/?\s*>/gi,'\n').replace(/\r\n?/g,'\n').replace(/[\t ]+/g,' ').replace(/\n\s*\n+/g,'\n').trim();
+}
+function values(trial){
+  const fields = new Map(), originals = [];
+  for(const el of trial.getElementsByTagName('*')){
+    // Preferir as folhas, mas permitir elementos contendo apenas marcação de texto.
+    const kids = Array.from(el.children);
+    if(kids.some(ch => canonical(ch.localName) !== 'br')) continue;
+    const name = el.localName || el.nodeName;
+    const value = plainText(el);
+    if(!value) continue;
+    const key = canonical(name);
+    if(!fields.has(key)) fields.set(key,[]);
+    if(!fields.get(key).includes(value)) fields.get(key).push(value);
+    originals.push([name,value]);
+  }
+  const get = (...names) => names.flatMap(n => fields.get(canonical(n)) || []).filter(Boolean).join('; ');
+  return {fields,originals,get};
+}
+function normalDate(s){
+  if(!s)return '';
+  let m=s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if(m)return `${m[1]}/${m[2]}/${m[3]}`;
+  m=s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if(m)return `${m[3]}/${m[2]}/${m[1]}`;
+  m=s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(m)return `${m[1]}/${m[2]}/${m[3]}`;
+  m=s.match(/^(\d{4})$/);
+  if(m)return m[1];
+  return '';
+}
+function risLine(tag, value){
+  if(!value)return '';
+  const clean = String(value).replace(/\r\n?|\n/g,' | ').replace(/[\u2028\u2029]/g,' ').replace(/\s+/g,' ').trim();
+  return clean ? `${tag}  - ${clean}\r\n` : '';
+}
+function getUrl(s){
+  if(!s) return '';
+  // Endereços podem estar separados por espaço, ponto e vírgula ou quebras.
+  const matches = s.match(/https?:\/\/[^\s;<>"']+/g) || [];
+  return matches[0] || '';
+}
+function convertTrial(trial, buildSummary, preserveFields){
+  const {originals,get} = values(trial);
+  const title = get('Scientific_title') || get('Public_title');
+  const id = get('TrialID');
+  if(!title) return {skip:true,id};
+  const publicTitle = get('Public_title');
+  const summary = get('Brief_summary','Abstract','Study_summary','Brief_description','Detailed_description','Description','Summary');
+  const regDate = normalDate(get('Date_registration3')) || normalDate(get('Date_registration'));
+  const url = getUrl(get('web_address','results_url_link','results_url_protocol'));
+  let out = risLine('TY','RPRT') + risLine('TI',title);
+  if(regDate)out += risLine('DA', regDate);
+  if(url)out += risLine('UR', url);
+  if(id)out += risLine('AN', id);
+  let abstractText = summary;
+  if(!summary && buildSummary){
+    const sourceFields = [
+      ['Condição',get('Health_condition','Health_conditions','Condition','Conditions','Condition_studied','hc_freetext')],
+      ['Tipo de estudo',get('Study_type')],
+      ['Desenho',get('Study_design')],
+      ['Intervenção',get('Intervention')],
+      ['Amostra prevista',get('Target_size')],
+      ['Desfecho primário',get('Primary_outcome')],
+      ['Desfecho secundário',get('Secondary_outcome')],
+      ['Estado do recrutamento',get('Recruitment_Status')]
+    ].filter(([,value])=>value);
+    if(sourceFields.length){
+      abstractText='SÍNTESE DE TRIAGEM (compilada automaticamente de campos do registro; não é um abstract original): '+
+        sourceFields.map(([label,value])=>label+': '+value).join(' | ');
+    }
+  }
+  if(abstractText)out += risLine('AB',abstractText);
+  if(id)out += risLine('N1','ID de registro do ensaio: '+id);
+  if(regDate)out += risLine('N1','Data de registro do ensaio (não necessariamente publicação): '+regDate);
+  out += risLine('N1','Fonte dos metadados: WHO International Clinical Trials Registry Platform (ICTRP)');
+  if(publicTitle && publicTitle !== title) out += risLine('N1','Título público: '+publicTitle);
+  if(preserveFields){
+    const consumed = new Set(['trialid','scientifictitle','publictitle','dateregistration','dateregistration3',
+      'webaddress','resultsurllink','resultsurlprotocol','briefsummary','abstract','studysummary',
+      'briefdescription','detaileddescription','description','summary']);
+    const seen = new Set();
+    for(const [key,value] of originals){
+      const norm = canonical(key), combination = norm+'\u0000'+value;
+      if(consumed.has(norm) || seen.has(combination)) continue;
+      seen.add(combination);
+      out += risLine('N1',(labelMap[norm] || key)+': '+value);
+    }
+  }
+  out += 'ER  - \r\n\r\n';
+  return {skip:false,out,id,title,abstract:!!abstractText};
+}
+function convertXML(xml,buildSummary,preserveFields){
+  const parsed = new DOMParser().parseFromString(xml,'application/xml');
+  const error = parsed.getElementsByTagName('parsererror')[0];
+  if(error) throw new Error('O arquivo XML não é válido: '+error.textContent.replace(/\s+/g,' ').slice(0,230));
+  const root = parsed.documentElement;
+  if(!root)throw new Error('O arquivo XML está vazio.');
+  const trials = Array.from(parsed.getElementsByTagName('*')).filter(n=>canonical(n.localName || n.nodeName)==='trial');
+  if(!trials.length) throw new Error('Nenhum registro <Trial> encontrado. Confira se o arquivo veio da exportação de resultados do ICTRP. Elemento raiz encontrado: '+root.nodeName);
+  const items=[], skipped=[], ids=new Set();let duplicates=0, withAbstract=0, withoutId=0;
+  for(const t of trials){
+    const r=convertTrial(t,buildSummary,preserveFields);
+    if(r.skip){skipped.push(r.id||'[sem ID]');continue;}
+    if(!r.id)withoutId++;
+    if(r.id && ids.has(r.id))duplicates++;
+    if(r.id)ids.add(r.id);
+    if(r.abstract)withAbstract++;
+    items.push(r);
+  }
+  if(!items.length)throw new Error('Foram encontrados '+trials.length+' ensaios, mas nenhum continha <Scientific_title> ou <Public_title>. Nenhum RIS foi produzido.');
+  return {ris:items.map(x=>x.out).join(''),total:trials.length,count:items.length,skipped,duplicates,withoutId,withAbstract,samples:items.slice(0,3)};
+}
+document.getElementById('convert').addEventListener('click', async ()=>{
+  risOutput='';downloadButton.disabled=true;previewSection.classList.add('hidden');
+  const f=input.files?.[0];
+  if(!f){status.textContent='Selecione primeiro o arquivo XML.';return;}
+  status.textContent='Lendo e verificando os registros...';
+  try{
+    const xml=await f.text();
+    const r=convertXML(xml,document.getElementById('synthesize').checked,document.getElementById('allFields').checked);
+    risOutput=r.ris;
+    status.textContent = `XML válido.\nRegistros <Trial> encontrados: ${r.total}\nRegistros convertidos: ${r.count}\nRegistros sem título (não convertidos): ${r.skipped.length}\nRegistros sem TrialID: ${r.withoutId}\nIDs repetidos no XML: ${r.duplicates}\nRegistros com informação no campo Resumo do RIS: ${r.withAbstract}\n\nConfira a prévia e clique em “Baixar RIS”.` +
+      (r.skipped.length ? '\nIDs de registros ignorados: '+r.skipped.slice(0,10).join(', ') : '');
+    preview.textContent=r.samples.map(item=>'ID: '+(item.id||'[sem ID]')+'\nTítulo: '+item.title).join('\n\n');
+    previewSection.classList.remove('hidden');
+    downloadButton.disabled=false;
+  }catch(err){status.textContent='Falha na conversão: '+err.message;}
+});
+downloadButton.addEventListener('click',()=>{
+  if(!risOutput)return;
+  const fileBlob = new Blob([risOutput],{type:'application/x-research-info-systems;charset=utf-8'});
+  const url=URL.createObjectURL(fileBlob),a=document.createElement('a');
+  a.href=url;a.download='ICTRP_para_Zotero.ris';document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),2000);
+});
+</script>
+</body></html>
